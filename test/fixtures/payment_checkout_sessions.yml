@@ -1,0 +1,31 @@
+# Read about fixtures at https://api.rubyonrails.org/classes/ActiveRecord/FixtureSet.html
+
+one:
+  user: one
+  credit_product: one
+  stripe_customer: one
+  stripe_checkout_session_id: MyString
+  status: MyString
+  amount_total: 1
+  currency: MyString
+  credits: 1
+  success_url: MyText
+  cancel_url: MyText
+  metadata: {}
+  completed_at: 2026-05-15 06:14:36
+  expires_at: 2026-05-15 06:14:36
+
+two:
+  user: two
+  credit_product: two
+  stripe_customer: two
+  stripe_checkout_session_id: MyString
+  status: MyString
+  amount_total: 1
+  currency: MyString
+  credits: 1
+  success_url: MyText
+  cancel_url: MyText
+  metadata: {}
+  completed_at: 2026-05-15 06:14:36
+  expires_at: 2026-05-15 06:14:36

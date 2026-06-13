@@ -1,0 +1,25 @@
+# Read about fixtures at https://api.rubyonrails.org/classes/ActiveRecord/FixtureSet.html
+
+one:
+  user: one
+  credit_balance: one
+  app_key: MyString
+  transaction_type: MyString
+  amount: 1
+  balance_after: 1
+  source_type: MyString
+  source_id: MyString
+  description: MyString
+  metadata: {}
+
+two:
+  user: two
+  credit_balance: two
+  app_key: MyString
+  transaction_type: MyString
+  amount: 1
+  balance_after: 1
+  source_type: MyString
+  source_id: MyString
+  description: MyString
+  metadata: {}

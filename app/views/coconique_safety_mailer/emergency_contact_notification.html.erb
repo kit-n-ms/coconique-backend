@@ -1,0 +1,21 @@
+<p><%= @contact.name %> 様</p>
+
+<p>ココニークで、<%= @profile&.display_name || @user.email.split("@").first %>さんの帰宅確認に関する通知があります。</p>
+
+<% if @notification.help? %>
+<p><%= @profile&.display_name || @user.email.split("@").first %>さんが、おでかけ後確認で「困っています / 相談したい」を選択しました。</p>
+<% else %>
+<p><%= @profile&.display_name || @user.email.split("@").first %>さんの帰宅確認が、設定された時間内に取れていません。</p>
+<% end %>
+
+<p>対象のおでかけ：<%= @event_start_label %>頃の予定</p>
+<% if @session.share_event_title? %>
+<p>タイトル：<%= @event.title %></p>
+<% end %>
+<% if @session.share_event_area? %>
+<p>エリア：<%= @event.area %></p>
+<% end %>
+
+<p>事前に承認された連絡先として、この通知をお送りしています。必要に応じて、<%= @profile&.display_name || @user.email.split("@").first %>さんへ直接ご連絡ください。</p>
+
+<p>※ココニークは緊急通報機関ではありません。差し迫った危険が疑われる場合は、警察・救急など適切な外部窓口への連絡も検討してください。</p>

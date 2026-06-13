@@ -1,0 +1,31 @@
+# Read about fixtures at https://api.rubyonrails.org/classes/ActiveRecord/FixtureSet.html
+
+one:
+  user: one
+  display_name: MyString
+  full_name: 山田 太郎
+  legal_last_name: 山田
+  legal_first_name: 太郎
+  legal_middle_name:
+  legal_last_name_kana: ヤマダ
+  legal_first_name_kana: タロウ
+  legal_middle_name_kana:
+  legal_full_name_raw: 山田 太郎
+  locale: ja
+  timezone: Asia/Tokyo
+  marketing_opt_in: false
+
+two:
+  user: two
+  display_name: MyString
+  full_name: 山田 太郎
+  legal_last_name: 山田
+  legal_first_name: 太郎
+  legal_middle_name:
+  legal_last_name_kana: ヤマダ
+  legal_first_name_kana: タロウ
+  legal_middle_name_kana:
+  legal_full_name_raw: 山田 太郎
+  locale: ja
+  timezone: Asia/Tokyo
+  marketing_opt_in: false

@@ -1,0 +1,19 @@
+# Read about fixtures at https://api.rubyonrails.org/classes/ActiveRecord/FixtureSet.html
+
+one:
+  stripe_event_id: MyString
+  event_type: MyString
+  api_version: MyString
+  livemode: false
+  processed_at: 2026-05-15 06:15:21
+  processing_error: MyText
+  payload: {}
+
+two:
+  stripe_event_id: MyString
+  event_type: MyString
+  api_version: MyString
+  livemode: false
+  processed_at: 2026-05-15 06:15:21
+  processing_error: MyText
+  payload: {}

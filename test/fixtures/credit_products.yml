@@ -1,0 +1,21 @@
+# Read about fixtures at https://api.rubyonrails.org/classes/ActiveRecord/FixtureSet.html
+
+one:
+  app_key: MyString
+  code: MyString
+  name: MyString
+  description: MyText
+  amount_jpy: 1
+  credits: 1
+  active: false
+  display_order: 1
+
+two:
+  app_key: MyString
+  code: MyString
+  name: MyString
+  description: MyText
+  amount_jpy: 1
+  credits: 1
+  active: false
+  display_order: 1

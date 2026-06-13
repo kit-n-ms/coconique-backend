@@ -1,0 +1,19 @@
+# Read about fixtures at https://api.rubyonrails.org/classes/ActiveRecord/FixtureSet.html
+
+one:
+  user: one
+  app_key: MyString
+  terms_version: MyString
+  privacy_version: MyString
+  accepted_at: 2026-05-13 14:50:32
+  ip_address: MyString
+  user_agent: MyText
+
+two:
+  user: two
+  app_key: MyString
+  terms_version: MyString
+  privacy_version: MyString
+  accepted_at: 2026-05-13 14:50:32
+  ip_address: MyString
+  user_agent: MyText

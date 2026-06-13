@@ -1,0 +1,13 @@
+# Read about fixtures at https://api.rubyonrails.org/classes/ActiveRecord/FixtureSet.html
+
+one:
+  user: one
+  stripe_customer_id: MyString
+  livemode: false
+  deleted_at: 2026-05-15 06:14:03
+
+two:
+  user: two
+  stripe_customer_id: MyString
+  livemode: false
+  deleted_at: 2026-05-15 06:14:03

@@ -1,0 +1,17 @@
+# Read about fixtures at https://api.rubyonrails.org/classes/ActiveRecord/FixtureSet.html
+
+one:
+  email: MyString
+  reason: MyString
+  source: MyString
+  source_event_id: MyString
+  suppressed_at: 2026-05-18 20:08:12
+  metadata: 
+
+two:
+  email: MyString
+  reason: MyString
+  source: MyString
+  source_event_id: MyString
+  suppressed_at: 2026-05-18 20:08:12
+  metadata: 
