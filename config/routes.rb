@@ -21,6 +21,7 @@ Rails.application.routes.draw do
 
       post "auth/email_verifications", to: "auth/email_verifications#create"
       post "auth/email_verifications/confirm", to: "auth/email_verifications#confirm"
+      post "auth/email_change_requests", to: "auth/email_change_requests#create"
 
       post "auth/password_resets", to: "auth/password_resets#create"
       patch "auth/password_resets/confirm", to: "auth/password_resets#confirm"
@@ -72,8 +73,10 @@ Rails.application.routes.draw do
         resource :balance, only: [:show], controller: "balances"
         resources :credit_transactions, only: [:index]
         resources :checkout_sessions, only: [:create] do
+          post :sync, on: :collection
           post :fake_complete, on: :member
         end
+        resource :portal_session, only: [:create], controller: "portal_sessions"
       end
 
       namespace :coconique do
@@ -87,6 +90,7 @@ Rails.application.routes.draw do
         post "safety/phone_verifications", to: "safety_registrations#create_phone_verification"
         post "safety/phone_verifications/confirm", to: "safety_registrations#confirm_phone_verification"
         post "safety/identity_verifications", to: "safety_registrations#create_identity_verification"
+        post "safety/identity_verifications/sync", to: "safety_registrations#sync_identity_verification"
         post "safety/identity_verifications/didit/session", to: "safety_registrations#create_identity_verification"
         post "safety/identity_verifications/quick_trust/session", to: "safety_registrations#create_identity_verification"
         post "safety/identity_verifications/fake_complete", to: "safety_registrations#fake_complete_identity_verification"
@@ -137,6 +141,8 @@ Rails.application.routes.draw do
           patch :approve, on: :member
           patch :reject, on: :member
           patch :withdraw, on: :member
+          patch :cancel, on: :member
+          patch :host_cancel, on: :member
           patch :attendance, on: :member
         end
       end

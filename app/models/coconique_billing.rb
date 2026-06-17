@@ -83,6 +83,10 @@ class CoconiqueBilling
 
     def sync_subscription_period!(user:, now: Time.current)
       return unless user.coconique_billing_active?
+      # Stripe Subscriptionユーザーは `invoice.paid` webhookをチケット付与の正とする。
+      # ここで自動付与すると、checkout.session.completed / subscription.updated だけで
+      # チケットが付く可能性があるため、Stripe連動時は同期のみスキップする。
+      return if user.respond_to?(:coconique_stripe_subscription_id) && user.coconique_stripe_subscription_id.present?
 
       if user.coconique_subscription_current_period_started_at.blank? || user.coconique_subscription_current_period_ends_at.blank?
         start_at = user.coconique_subscription_started_at || now
@@ -674,6 +678,429 @@ class CoconiqueBilling
       end
 
       balance.reload
+    end
+
+
+    def record_stripe_subscription_checkout_completed!(payment:, checkout_session:)
+      return if payment.completed?
+
+      now = Time.current
+      subscription_id = stripe_id(stripe_value(checkout_session, :subscription))
+      customer_id = stripe_id(stripe_value(checkout_session, :customer))
+      payment_status = stripe_value(checkout_session, :payment_status)
+      invoice_id = stripe_id(stripe_value(checkout_session, :invoice))
+
+      PaymentCheckoutSession.transaction do
+        payment.lock!
+        return if payment.completed?
+
+        payment.update!(
+          status: "completed",
+          completed_at: now,
+          stripe_subscription_id: subscription_id,
+          stripe_invoice_id: invoice_id,
+          stripe_payment_status: payment_status,
+          metadata: payment.metadata.merge(
+            "stripe_checkout_session_completed_at" => now.iso8601,
+            "stripe_customer_id" => customer_id,
+            "stripe_subscription_id" => subscription_id,
+            "stripe_invoice_id" => invoice_id,
+            "stripe_payment_status" => payment_status,
+            "activation_source" => "checkout.session.completed",
+            "tickets_granted_by" => "invoice.paid"
+          ).compact
+        )
+
+        payment.user.update!(
+          card_registered_at: payment.user.card_registered_at || now,
+          coconique_subscription_plan: "founder_beta",
+          coconique_subscription_status: stripe_subscription_status_for("incomplete"),
+          coconique_subscription_started_at: payment.user.coconique_subscription_started_at,
+          coconique_founder_beta_joined_at: payment.user.coconique_founder_beta_joined_at,
+          coconique_stripe_subscription_id: subscription_id.presence || payment.user.coconique_stripe_subscription_id,
+          coconique_stripe_price_id: payment.metadata["stripe_price_id"].presence || payment.user.coconique_stripe_price_id,
+          coconique_subscription_latest_invoice_id: invoice_id.presence || payment.user.coconique_subscription_latest_invoice_id,
+          coconique_subscription_past_due_at: nil
+        )
+        payment.user.refresh_coconique_safety_registered_at! if payment.user.respond_to?(:refresh_coconique_safety_registered_at!)
+      end
+    end
+
+    def apply_stripe_invoice_paid!(stripe_invoice:, source: nil)
+      user = find_user_for_stripe_invoice(stripe_invoice)
+      return nil if user.blank?
+
+      invoice_id = stripe_value(stripe_invoice, :id)
+      return user if invoice_id.present? && user.coconique_subscription_latest_invoice_id == invoice_id && monthly_grant_for_invoice_exists?(user, invoice_id)
+
+      now = Time.current
+      subscription_id = stripe_subscription_id_from_invoice(stripe_invoice)
+      customer_id = stripe_id(stripe_value(stripe_invoice, :customer))
+      price_id = stripe_invoice_price_id(stripe_invoice)
+      period_started_at, period_ends_at = stripe_invoice_period(stripe_invoice)
+      period_started_at ||= now
+      period_ends_at ||= period_started_at + 1.month
+      amount_paid = stripe_value(stripe_invoice, :amount_paid).to_i
+      currency = stripe_value(stripe_invoice, :currency).presence || "jpy"
+      billing_reason = stripe_value(stripe_invoice, :billing_reason)
+
+      User.transaction do
+        user.lock!
+        return user if invoice_id.present? && user.coconique_subscription_latest_invoice_id == invoice_id && monthly_grant_for_invoice_exists?(user, invoice_id)
+
+        user.update!(
+          card_registered_at: user.card_registered_at || now,
+          coconique_subscription_plan: "founder_beta",
+          coconique_subscription_status: stripe_subscription_status_for("active"),
+          coconique_subscription_started_at: user.coconique_subscription_started_at || period_started_at,
+          coconique_subscription_current_period_started_at: period_started_at,
+          coconique_subscription_current_period_ends_at: period_ends_at,
+          coconique_founder_beta_joined_at: user.coconique_founder_beta_joined_at || now,
+          coconique_stripe_subscription_id: subscription_id.presence || user.coconique_stripe_subscription_id,
+          coconique_stripe_price_id: price_id.presence || user.coconique_stripe_price_id,
+          coconique_subscription_latest_invoice_id: invoice_id.presence || user.coconique_subscription_latest_invoice_id,
+          coconique_subscription_last_payment_at: now,
+          coconique_subscription_past_due_at: nil,
+          coconique_subscription_cancel_at_period_end: false
+        )
+      end
+
+      payment = find_payment_for_stripe_invoice(stripe_invoice, user: user)
+      payment&.update!(
+        status: "completed",
+        completed_at: payment.completed_at || now,
+        stripe_subscription_id: subscription_id.presence || payment.stripe_subscription_id,
+        stripe_invoice_id: invoice_id.presence || payment.stripe_invoice_id,
+        stripe_payment_intent_id: stripe_id(stripe_value(stripe_invoice, :payment_intent)).presence || payment.stripe_payment_intent_id,
+        stripe_payment_status: "paid",
+        metadata: payment.metadata.merge(
+          "stripe_invoice_id" => invoice_id,
+          "stripe_subscription_id" => subscription_id,
+          "stripe_invoice_paid_at" => now.iso8601
+        ).compact
+      )
+
+      grant_monthly_host_tickets!(
+        user: user.reload,
+        source: source || payment || user,
+        period_started_at: period_started_at,
+        period_ends_at: period_ends_at,
+        metadata: {
+          subscription_plan: "founder_beta",
+          subscription_status: "active",
+          billing_provider: "stripe",
+          stripe_invoice_id: invoice_id,
+          stripe_subscription_id: subscription_id,
+          stripe_customer_id: customer_id,
+          stripe_price_id: price_id,
+          amount_paid: amount_paid,
+          currency: currency,
+          billing_reason: billing_reason
+        }.compact
+      )
+
+      capture_stripe_card_fingerprint_signal!(
+        user: user.reload,
+        stripe_invoice: stripe_invoice,
+        source: source || payment || user
+      )
+
+      user.reload.refresh_coconique_safety_registered_at! if user.respond_to?(:refresh_coconique_safety_registered_at!)
+      user
+    end
+
+    def mark_stripe_invoice_payment_failed!(stripe_invoice:, source: nil)
+      user = find_user_for_stripe_invoice(stripe_invoice)
+      return nil if user.blank?
+
+      invoice_id = stripe_value(stripe_invoice, :id)
+      subscription_id = stripe_subscription_id_from_invoice(stripe_invoice)
+      now = Time.current
+
+      user.update!(
+        coconique_subscription_status: stripe_subscription_status_for("past_due"),
+        coconique_stripe_subscription_id: subscription_id.presence || user.coconique_stripe_subscription_id,
+        coconique_subscription_latest_invoice_id: invoice_id.presence || user.coconique_subscription_latest_invoice_id,
+        coconique_subscription_past_due_at: user.coconique_subscription_past_due_at || now,
+        safety_registered_at: nil
+      )
+
+      host_ticket_balance_for(user).record_lifecycle!(
+        source: source || user,
+        transaction_type: "subscription_past_due",
+        description: "Coconique月額プランの支払い確認が必要です",
+        metadata: {
+          stripe_invoice_id: invoice_id,
+          stripe_subscription_id: subscription_id,
+          billing_provider: "stripe"
+        }.compact
+      )
+    end
+
+    def sync_stripe_subscription_status!(stripe_subscription:, source: nil)
+      subscription_id = stripe_value(stripe_subscription, :id)
+      user = User.find_by(coconique_stripe_subscription_id: subscription_id)
+      user ||= find_user_for_stripe_customer(stripe_value(stripe_subscription, :customer))
+      return nil if user.blank?
+
+      now = Time.current
+      stripe_status = stripe_value(stripe_subscription, :status)
+      period_started_at = stripe_time(stripe_value(stripe_subscription, :current_period_start))
+      period_ends_at = stripe_time(stripe_value(stripe_subscription, :current_period_end))
+      canceled_at = stripe_time(stripe_value(stripe_subscription, :canceled_at))
+      cancel_at = stripe_time(stripe_value(stripe_subscription, :cancel_at))
+      cancel_at_period_end = ActiveModel::Type::Boolean.new.cast(stripe_value(stripe_subscription, :cancel_at_period_end))
+
+      local_status = stripe_subscription_status_for(stripe_status)
+      if stripe_subscription_active_status?(stripe_status) && user.coconique_subscription_latest_invoice_id.blank? && !paid_subscription_evidence?(user)
+        local_status = :incomplete
+      end
+      if stripe_subscription_active_status?(stripe_status) && paid_subscription_evidence?(user)
+        local_status = :active
+      end
+
+      user.update!(
+        coconique_stripe_subscription_id: subscription_id.presence || user.coconique_stripe_subscription_id,
+        coconique_subscription_status: local_status,
+        coconique_subscription_plan: user.coconique_subscription_plan.presence || "founder_beta",
+        coconique_subscription_started_at: user.coconique_subscription_started_at || period_started_at || now,
+        coconique_subscription_current_period_started_at: period_started_at || user.coconique_subscription_current_period_started_at,
+        coconique_subscription_current_period_ends_at: period_ends_at || user.coconique_subscription_current_period_ends_at,
+        coconique_subscription_cancel_at_period_end: cancel_at_period_end,
+        coconique_subscription_cancel_at: cancel_at,
+        coconique_subscription_canceled_at: canceled_at || (stripe_status == "canceled" ? now : user.coconique_subscription_canceled_at),
+        coconique_subscription_past_due_at: stripe_status == "past_due" ? (user.coconique_subscription_past_due_at || now) : nil,
+        safety_registered_at: %i[active trialing].include?(local_status) ? user.safety_registered_at : nil
+      )
+
+      user.refresh_coconique_safety_registered_at! if user.respond_to?(:refresh_coconique_safety_registered_at!)
+      user
+    end
+
+    def handle_stripe_subscription_deleted!(stripe_subscription:, source: nil)
+      user = sync_stripe_subscription_status!(stripe_subscription: stripe_subscription, source: source)
+      return nil if user.blank?
+
+      cancel_coconique_subscription!(
+        user: user,
+        reason: "stripe_subscription_deleted",
+        source: source
+      )
+      user.reload.refresh_coconique_safety_registered_at! if user.respond_to?(:refresh_coconique_safety_registered_at!)
+      user
+    end
+
+
+    def repair_paid_subscription_state!(user)
+      return user if user.blank? || !user.persisted?
+      return user if user.coconique_subscription_active? || user.coconique_subscription_trialing?
+      return user unless user.coconique_subscription_founder_beta_like?
+      return user unless paid_subscription_evidence?(user)
+
+      now = Time.current
+      attrs = {
+        coconique_subscription_status: User.coconique_subscription_statuses[:active],
+        coconique_subscription_past_due_at: nil,
+        safety_registered_at: nil,
+        updated_at: now
+      }
+      if user.coconique_subscription_started_at.blank?
+        attrs[:coconique_subscription_started_at] = user.coconique_subscription_current_period_started_at || now
+      end
+      if user.coconique_subscription_current_period_started_at.blank?
+        attrs[:coconique_subscription_current_period_started_at] = user.coconique_subscription_started_at || now
+      end
+      if user.coconique_subscription_current_period_ends_at.blank?
+        attrs[:coconique_subscription_current_period_ends_at] = (attrs[:coconique_subscription_current_period_started_at] || now) + 1.month
+      end
+
+      user.update_columns(**attrs)
+      user.reload.refresh_coconique_safety_registered_at! if user.respond_to?(:refresh_coconique_safety_registered_at!)
+      user
+    end
+
+    def paid_subscription_evidence?(user)
+      return false if user.blank?
+      return false unless user.coconique_subscription_founder_beta_like?
+      return false if user.withdrawn? || user.banned?
+
+      period_ends_at = user.coconique_subscription_current_period_ends_at
+      return false if period_ends_at.present? && period_ends_at <= Time.current
+
+      return true if user.coconique_subscription_last_payment_at.present?
+      return true if user.coconique_subscription_latest_invoice_id.present?
+
+      user.coconique_host_ticket_lots.monthly_grants_for_current_period.exists?
+    end
+
+    def capture_stripe_card_fingerprint_signal!(user:, stripe_invoice:, source:)
+      return unless defined?(Coconique::ReentrySignals)
+      return unless stripe_card_fingerprint_capture_enabled?
+
+      payment_intent = stripe_value(stripe_invoice, :payment_intent)
+      payment_intent_id = stripe_id(payment_intent)
+      return if payment_intent_id.blank?
+
+      payment_intent_object = payment_intent
+      if payment_intent_object.is_a?(String) || stripe_value(payment_intent_object, :payment_method).blank?
+        return unless defined?(Stripe::PaymentIntent)
+
+        payment_intent_object = Stripe::PaymentIntent.retrieve(
+          id: payment_intent_id,
+          expand: ["payment_method"]
+        )
+      end
+
+      payment_method = stripe_value(payment_intent_object, :payment_method)
+      card = stripe_value(payment_method, :card)
+      fingerprint = stripe_value(card, :fingerprint)
+      return if fingerprint.blank?
+
+      Coconique::ReentrySignals.record_stripe_card_fingerprint!(
+        user: user,
+        fingerprint: fingerprint,
+        source: source,
+        metadata: {
+          stripe_payment_intent_id: payment_intent_id,
+          stripe_invoice_id: stripe_value(stripe_invoice, :id),
+          card_brand: stripe_value(card, :brand),
+          card_country: stripe_value(card, :country),
+          card_last4_present: stripe_value(card, :last4).present?,
+          raw_card_number_stored: false
+        }.compact
+      )
+    rescue StandardError => e
+      Rails.logger.warn("[CoconiqueBilling] stripe card fingerprint capture skipped: #{e.class}: #{e.message}")
+      nil
+    end
+
+    def stripe_card_fingerprint_capture_enabled?
+      return false if Rails.env.test? && ENV["COCONIQUE_CAPTURE_STRIPE_CARD_FINGERPRINT"].blank?
+
+      ActiveModel::Type::Boolean.new.cast(ENV.fetch("COCONIQUE_CAPTURE_STRIPE_CARD_FINGERPRINT", "true"))
+    end
+
+    def find_user_for_stripe_invoice(stripe_invoice)
+      metadata = stripe_invoice_metadata(stripe_invoice)
+      user = User.find_by(id: metadata["user_id"]) if metadata["user_id"].present?
+      return user if user.present?
+
+      subscription_id = stripe_subscription_id_from_invoice(stripe_invoice)
+      user = User.find_by(coconique_stripe_subscription_id: subscription_id) if subscription_id.present?
+      return user if user.present?
+
+      find_user_for_stripe_customer(stripe_value(stripe_invoice, :customer))
+    end
+
+    def find_user_for_stripe_customer(stripe_customer_id)
+      return nil if stripe_customer_id.blank?
+
+      StripeCustomer.find_by(stripe_customer_id: stripe_customer_id)&.user
+    end
+
+    def find_payment_for_stripe_invoice(stripe_invoice, user: nil)
+      metadata = stripe_invoice_metadata(stripe_invoice)
+      payment = PaymentCheckoutSession.find_by(id: metadata["payment_checkout_session_id"]) if metadata["payment_checkout_session_id"].present?
+      return payment if payment.present?
+
+      subscription_id = stripe_subscription_id_from_invoice(stripe_invoice)
+      scope = PaymentCheckoutSession.where(stripe_subscription_id: subscription_id) if subscription_id.present?
+      scope ||= user&.payment_checkout_sessions&.where(checkout_mode: "subscription")
+      scope&.order(created_at: :desc)&.first
+    end
+
+    def stripe_invoice_metadata(stripe_invoice)
+      metadata = {}
+      [
+        stripe_value(stripe_invoice, :metadata),
+        stripe_value(stripe_value(stripe_invoice, :subscription_details), :metadata),
+        stripe_value(stripe_value(stripe_invoice, :parent), :subscription_details)&.then { |details| stripe_value(details, :metadata) }
+      ].compact.each do |candidate|
+        candidate.to_h.each { |key, value| metadata[key.to_s] = value }
+      end
+      metadata
+    rescue NoMethodError
+      metadata
+    end
+
+    def stripe_subscription_id_from_invoice(stripe_invoice)
+      direct = stripe_value(stripe_invoice, :subscription)
+      return direct if direct.present?
+
+      parent = stripe_value(stripe_invoice, :parent)
+      subscription_details = stripe_value(parent, :subscription_details)
+      stripe_value(subscription_details, :subscription)
+    end
+
+    def stripe_invoice_price_id(stripe_invoice)
+      line = stripe_invoice_subscription_line(stripe_invoice)
+      price = stripe_value(line, :price)
+      stripe_value(price, :id)
+    end
+
+    def stripe_invoice_period(stripe_invoice)
+      line = stripe_invoice_subscription_line(stripe_invoice)
+      period = stripe_value(line, :period)
+      started_at = stripe_time(stripe_value(period, :start)) || stripe_time(stripe_value(stripe_invoice, :period_start))
+      ends_at = stripe_time(stripe_value(period, :end)) || stripe_time(stripe_value(stripe_invoice, :period_end))
+      [started_at, ends_at]
+    end
+
+    def stripe_invoice_subscription_line(stripe_invoice)
+      lines = stripe_value(stripe_invoice, :lines)
+      data = stripe_value(lines, :data)
+      Array(data).find do |line|
+        price = stripe_value(line, :price)
+        recurring = stripe_value(price, :recurring)
+        stripe_value(recurring, :interval).present?
+      end || Array(data).first
+    end
+
+    def stripe_time(value)
+      return value if value.is_a?(Time) || value.is_a?(ActiveSupport::TimeWithZone)
+      return nil if value.blank?
+
+      Time.zone.at(value.to_i)
+    end
+
+    def stripe_id(value)
+      return nil if value.blank?
+      return value if value.is_a?(String)
+
+      stripe_value(value, :id)
+    end
+
+    def stripe_value(object, key)
+      return nil if object.blank?
+      return object[key] if object.respond_to?(:key?) && object.key?(key)
+      return object[key.to_s] if object.respond_to?(:key?) && object.key?(key.to_s)
+      return object.public_send(key) if object.respond_to?(key)
+
+      nil
+    end
+
+    def stripe_subscription_status_for(stripe_status)
+      case stripe_status.to_s
+      when "trialing" then :trialing
+      when "active" then :active
+      when "past_due" then :past_due
+      when "canceled" then :canceled
+      when "unpaid" then :unpaid
+      when "incomplete", "incomplete_expired" then :incomplete
+      else :none
+      end
+    end
+
+    def stripe_subscription_active_status?(stripe_status)
+      %w[active trialing].include?(stripe_status.to_s)
+    end
+
+    def monthly_grant_for_invoice_exists?(user, invoice_id)
+      return false if invoice_id.blank?
+
+      user.coconique_host_ticket_lots.any? do |lot|
+        lot.metadata["stripe_invoice_id"].to_s == invoice_id.to_s
+      end
     end
 
     def monthly_grant_type_for(user)

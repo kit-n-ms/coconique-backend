@@ -46,6 +46,8 @@ class User < ApplicationRecord
   has_many :coconique_promo_code_redemptions, dependent: :destroy
   has_many :coconique_safety_registration_intents, dependent: :destroy
   has_many :coconique_host_ticket_lots, dependent: :destroy
+  has_many :coconique_reentry_signals, dependent: :destroy
+  has_many :coconique_reentry_blocklist_entries, class_name: "CoconiqueReentryBlocklistEntry", foreign_key: :source_user_id, dependent: :nullify
 
   has_one :stripe_customer, dependent: :destroy
 
@@ -96,7 +98,9 @@ class User < ApplicationRecord
     trialing: 1,
     active: 2,
     past_due: 3,
-    canceled: 4
+    canceled: 4,
+    unpaid: 5,
+    incomplete: 6
   }, prefix: :coconique_subscription
 
   before_validation :normalize_email
@@ -142,8 +146,13 @@ class User < ApplicationRecord
     return false if withdrawn? || banned?
     return true if billing_exempted?
     return true if coconique_subscription_active? || coconique_subscription_trialing?
+    return true if CoconiqueBilling.paid_subscription_evidence?(self)
 
     false
+  end
+
+  def coconique_subscription_founder_beta_like?
+    coconique_subscription_plan.to_s == "founder_beta" || coconique_stripe_subscription_id.present?
   end
 
   def coconique_withdrawn?
@@ -180,10 +189,25 @@ class User < ApplicationRecord
     !coconique_collaborator_beta?
   end
 
+  def coconique_active_account_restriction?
+    return false unless persisted?
+
+    coconique_user_restrictions.active.where(status: [:restricted, :suspended, :banned]).exists?
+  end
+
+  def coconique_reentry_blocked?
+    return false unless persisted?
+
+    Coconique::ReentrySignals.blocked_identity_signal?(self) || Coconique::ReentrySignals.blocked_payment_signal?(self)
+  rescue NameError, ActiveRecord::StatementInvalid
+    false
+  end
+
   def coconique_can_apply_or_publish?
     return false unless active?
+    return false if coconique_active_account_restriction?
+    return false if coconique_reentry_blocked?
     return false unless email_verified?
-    return false unless phone_verified?
 
     if coconique_collaborator_beta?
       promo_code_verified? && beta_operator_verified? && coconique_billing_active?
@@ -195,7 +219,6 @@ class User < ApplicationRecord
   def coconique_safety_missing_requirements
     missing = []
     missing << "email" unless email_verified?
-    missing << "phone" unless phone_verified?
 
     if coconique_collaborator_beta?
       missing << "promo_code" unless promo_code_verified?
@@ -208,7 +231,7 @@ class User < ApplicationRecord
       missing << "age_over_18" unless age_over_18?
     end
 
-    missing << "account_status" unless active?
+    missing << "account_status" unless active? && !coconique_active_account_restriction? && !coconique_reentry_blocked?
     missing
   end
 

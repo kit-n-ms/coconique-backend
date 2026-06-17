@@ -83,14 +83,22 @@ module Api
             phone_number: normalized_phone
           )
 
-          # productionの実SMS送信はFirebase/Twilio等の本接続時に差し替える。
-          # fake_smsではコード 123456 を入力すると通過する。
           render_success(
             {
               phone_verification: serialize_phone_verification_attempt(attempt),
               safety_registration: serialize_coconique_safety_registration_status(current_user)
             }.merge(fake_sms_debug_payload),
             status: :created
+          )
+        rescue ::Coconique::SmsVerifications::TwilioVerifyProvider::ConfigurationError,
+          ::Coconique::SmsVerifications::TwilioVerifyProvider::ApiError => e
+          Rails.logger.warn("[PhoneVerification] start failed: #{e.class}: #{e.message}")
+          current_user.update!(phone_verification_status: :unverified) if current_user.phone_verification_pending?
+          render_error(
+            code: "SMS_PROVIDER_UNAVAILABLE",
+            message: "SMS認証サービスの準備ができていません。時間をおいて再度お試しください。",
+            status: :service_unavailable,
+            data: { detail: Rails.env.production? ? nil : e.message }
           )
         end
 
@@ -121,6 +129,15 @@ module Api
               safety_registration: serialize_coconique_safety_registration_status(current_user.reload)
             }
           )
+        rescue ::Coconique::SmsVerifications::TwilioVerifyProvider::ConfigurationError,
+          ::Coconique::SmsVerifications::TwilioVerifyProvider::ApiError => e
+          Rails.logger.warn("[PhoneVerification] confirm failed: #{e.class}: #{e.message}")
+          render_error(
+            code: "SMS_PROVIDER_CONFIRM_FAILED",
+            message: "SMS認証コードを確認できませんでした。少し時間をおいて再度お試しください。",
+            status: :unprocessable_entity,
+            data: { detail: Rails.env.production? ? nil : e.message }
+          )
         end
 
         def create_identity_verification
@@ -131,14 +148,6 @@ module Api
                 safety_registration: serialize_coconique_safety_registration_status(current_user),
                 message: "協力者βメンバーは本人確認書類の提出は不要です。"
               }
-            )
-          end
-
-          unless current_user.phone_verified?
-            return render_error(
-              code: "PHONE_VERIFICATION_REQUIRED",
-              message: "本人確認の前に電話番号確認を完了してください。",
-              status: :unprocessable_entity
             )
           end
 
@@ -162,6 +171,37 @@ module Api
             code: "IDENTITY_PROVIDER_UNAVAILABLE",
             message: "本人確認サービスの準備ができていません。時間をおいて再度お試しください。",
             status: :service_unavailable,
+            data: { detail: Rails.env.production? ? nil : e.message }
+          )
+        end
+
+
+        def sync_identity_verification
+          session = identity_session_for_sync
+
+          if session.blank?
+            return render_error(
+              code: "IDENTITY_VERIFICATION_SESSION_NOT_FOUND",
+              message: "本人確認セッションが見つかりません。もう一度本人確認を開始してください。",
+              status: :not_found
+            )
+          end
+
+          synced_session = sync_identity_session_from_provider(session)
+
+          render_success(
+            {
+              identity_verification: serialize_identity_verification_session(synced_session.reload),
+              safety_registration: serialize_coconique_safety_registration_status(current_user.reload)
+            }
+          )
+        rescue ::Coconique::IdentityVerifications::DiditProvider::ConfigurationError,
+          ::Coconique::IdentityVerifications::DiditProvider::ApiError => e
+          Rails.logger.warn("[IdentityVerification] sync failed: #{e.class}: #{e.message}")
+          render_error(
+            code: "IDENTITY_PROVIDER_SYNC_FAILED",
+            message: "本人確認結果の反映確認に失敗しました。少し時間をおいて再度お試しください。",
+            status: :unprocessable_entity,
             data: { detail: Rails.env.production? ? nil : e.message }
           )
         end
@@ -290,8 +330,43 @@ module Api
           payload.stringify_keys.slice("event_id", "draft_event_id", "message")
         end
 
+        def identity_session_for_sync
+          session_id = params[:identity_session_id].presence || params[:session_id].presence || params[:id].presence
+          provider_session_id = params[:provider_session_id].presence || params[:verification_session_id].presence || params[:verificationSessionId].presence
+
+          if session_id.present?
+            found = current_user.coconique_identity_verification_sessions.find_by(public_id: session_id)
+            return found if found.present?
+          end
+
+          if provider_session_id.present?
+            found = current_user.coconique_identity_verification_sessions.find_by(provider_session_id: provider_session_id)
+            return found if found.present?
+          end
+
+          current_user.coconique_identity_verification_sessions.recent_first.first
+        end
+
+        def sync_identity_session_from_provider(session)
+          case session.provider.to_s
+          when "didit"
+            provider = ::Coconique::IdentityVerifications::DiditProvider.new
+            decision = provider.retrieve_decision(session.provider_session_id)
+            provider.apply_decision_to_session!(
+              session,
+              decision,
+              webhook_metadata: {
+                "didit_sync_source" => "safety_registration_page",
+                "didit_synced_at" => Time.current.iso8601
+              }
+            )
+          else
+            session
+          end
+        end
+
         def create_provider_identity_session!
-          return_url = params[:return_url].to_s.presence || ENV.fetch("COCONIQUE_IDENTITY_RETURN_URL", "http://localhost:5173/app/safety/registration")
+          return_url = normalized_identity_return_url
           workflow_type = normalized_identity_workflow_type
 
           ::Coconique::IdentityVerifications::ProviderFactory.current.create_session(
@@ -299,6 +374,14 @@ module Api
             return_url: return_url,
             workflow_type: workflow_type
           )
+        end
+
+        def normalized_identity_return_url
+          supplied = params[:return_url].to_s.strip.presence
+          configured = ENV["COCONIQUE_IDENTITY_PUBLIC_RETURN_URL"].to_s.strip.presence || ENV["COCONIQUE_IDENTITY_RETURN_URL"].to_s.strip.presence
+          fallback = "http://localhost:5173/identity/return"
+
+          configured || supplied || fallback
         end
 
         def normalized_identity_workflow_type
@@ -309,7 +392,7 @@ module Api
         end
 
         def fake_sms_debug_payload
-          return {} unless Rails.env.development? || Rails.env.test? || CoconiquePhoneVerificationAttempt.fake_provider?
+          return {} unless CoconiquePhoneVerificationAttempt.fake_provider?
 
           { debug: { sms_code: CoconiquePhoneVerificationAttempt::DEV_TEST_CODE } }
         end

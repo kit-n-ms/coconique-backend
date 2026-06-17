@@ -29,9 +29,12 @@ module Webhooks
     class SignatureError < StandardError; end
 
     def process_payload!(payload)
-      return unless payload["webhook_type"].to_s == "status.updated"
+      webhook_type = payload["webhook_type"] || payload["webhookType"] || payload["type"] || payload["event_type"] || payload["eventType"]
+      return if webhook_type.present? && !webhook_type.to_s.in?(%w[status.updated session.updated session.completed verification.completed])
 
-      provider_session_id = payload["session_id"].to_s
+      provider = ::Coconique::IdentityVerifications::DiditProvider.new
+      decision = payload["decision"].is_a?(Hash) ? payload["decision"] : payload
+      provider_session_id = provider.session_id_from(payload).to_s.presence || provider.session_id_from(decision).to_s
       local_session = CoconiqueIdentityVerificationSession.find_by(provider: "didit", provider_session_id: provider_session_id)
 
       if local_session.blank?
@@ -39,50 +42,15 @@ module Webhooks
         return
       end
 
-      provider = ::Coconique::IdentityVerifications::DiditProvider.new
-      decision = payload["decision"].is_a?(Hash) ? payload["decision"] : payload
-      provider_status = payload["status"].presence || decision["status"]
-      workflow_type = local_session.workflow_type.presence || decision.dig("metadata", "workflow_type") || "standard_document"
-      document_type = provider.document_type_for(decision: decision, workflow_type: workflow_type)
-      safe_metadata = provider.safe_decision_metadata(decision, workflow_type: workflow_type)
-
-      case provider.status_for(provider_status)
-      when :verified
-        local_session.mark_verified!(
-          provider_session_id: provider_session_id,
-          age_over_18: true,
-          document_type: document_type,
-          provider_status: provider_status,
-          metadata: safe_metadata.merge("didit_webhook_type" => payload["webhook_type"], "didit_event_id" => payload["event_id"])
-        )
-        delete_provider_session!(provider, local_session)
-      when :rejected
-        local_session.mark_rejected!(
-          reason: "didit_declined",
-          provider_status: provider_status,
-          document_type: document_type,
-          metadata: safe_metadata.merge("didit_webhook_type" => payload["webhook_type"], "didit_event_id" => payload["event_id"])
-        )
-        delete_provider_session!(provider, local_session)
-      when :expired
-        local_session.mark_expired!(
-          provider_status: provider_status,
-          metadata: safe_metadata.merge("didit_webhook_type" => payload["webhook_type"], "didit_event_id" => payload["event_id"])
-        )
-        delete_provider_session!(provider, local_session)
-      else
-        local_session.mark_processing!(
-          provider_status: provider_status,
-          metadata: safe_metadata.merge("didit_webhook_type" => payload["webhook_type"], "didit_event_id" => payload["event_id"])
-        )
-      end
-    end
-
-    def delete_provider_session!(provider, local_session)
-      return if local_session.provider_session_id.blank?
-      return if local_session.deleted_at.present?
-
-      local_session.mark_provider_session_deleted! if provider.delete_session(local_session.provider_session_id)
+      provider.apply_decision_to_session!(
+        local_session,
+        decision,
+        webhook_metadata: {
+          "didit_webhook_type" => webhook_type,
+          "didit_event_id" => payload["event_id"] || payload["eventId"] || payload["id"],
+          "didit_webhook_received_at" => Time.current.iso8601
+        }
+      )
     end
 
     def verify_signature!(payload, raw_body)

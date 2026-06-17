@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_06_11_093000) do
+ActiveRecord::Schema[8.1].define(version: 2026_06_17_090002) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -216,6 +216,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_11_093000) do
     t.jsonb "target_members", default: [], null: false
     t.string "title", null: false
     t.datetime "updated_at", null: false
+    t.string "venue_name"
     t.index ["area_prefecture", "area_city"], name: "index_coconique_events_on_area_prefecture_and_area_city"
     t.index ["area_prefecture"], name: "index_coconique_events_on_area_prefecture"
     t.index ["canceled_at"], name: "index_coconique_events_on_canceled_at"
@@ -341,8 +342,15 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_11_093000) do
     t.datetime "attendance_recorded_at"
     t.bigint "attendance_recorded_by_id"
     t.integer "attendance_status", default: 0, null: false
+    t.datetime "canceled_at"
+    t.bigint "canceled_by_id"
+    t.text "cancellation_message"
+    t.jsonb "cancellation_metadata", default: {}, null: false
+    t.string "cancellation_reason_category"
+    t.string "cancellation_timing"
     t.bigint "coconique_event_id", null: false
     t.datetime "created_at", null: false
+    t.integer "late_cancel_points", default: 0, null: false
     t.text "message", default: "", null: false
     t.string "public_id", null: false
     t.datetime "reviewed_at"
@@ -352,9 +360,12 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_11_093000) do
     t.bigint "user_id", null: false
     t.datetime "withdrawn_at"
     t.index ["attendance_recorded_by_id"], name: "index_coconique_requests_on_attendance_recorded_by"
+    t.index ["canceled_at"], name: "index_coconique_participation_requests_on_canceled_at"
+    t.index ["canceled_by_id"], name: "index_coconique_participation_requests_on_canceled_by_id"
     t.index ["coconique_event_id", "attendance_status"], name: "index_coconique_requests_on_event_attendance_status"
     t.index ["coconique_event_id", "status"], name: "index_coconique_requests_on_event_and_status"
     t.index ["coconique_event_id"], name: "index_coconique_participation_requests_on_coconique_event_id"
+    t.index ["late_cancel_points"], name: "index_coconique_participation_requests_on_late_cancel_points"
     t.index ["public_id"], name: "index_coconique_participation_requests_on_public_id", unique: true
     t.index ["reviewed_by_id"], name: "index_coconique_participation_requests_on_reviewed_by_id"
     t.index ["status"], name: "index_coconique_participation_requests_on_status"
@@ -397,6 +408,43 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_11_093000) do
     t.index ["public_id"], name: "index_coconique_promo_code_redemptions_on_public_id", unique: true
     t.index ["user_id", "code_digest"], name: "idx_on_user_id_code_digest_21dd3cddfe", unique: true
     t.index ["user_id"], name: "index_coconique_promo_code_redemptions_on_user_id"
+  end
+
+  create_table "coconique_reentry_blocklist_entries", force: :cascade do |t|
+    t.datetime "blocked_at", null: false
+    t.datetime "created_at", null: false
+    t.datetime "lifted_at"
+    t.jsonb "metadata", default: {}, null: false
+    t.string "provider"
+    t.string "reason", null: false
+    t.string "signal_digest", null: false
+    t.string "signal_kind", null: false
+    t.bigint "source_user_id"
+    t.datetime "updated_at", null: false
+    t.index ["blocked_at"], name: "index_coconique_reentry_blocklist_entries_on_blocked_at"
+    t.index ["lifted_at"], name: "index_coconique_reentry_blocklist_entries_on_lifted_at"
+    t.index ["signal_kind", "signal_digest"], name: "idx_coconique_reentry_blocklist_active_unique", unique: true, where: "(lifted_at IS NULL)"
+    t.index ["signal_kind", "signal_digest"], name: "idx_coconique_reentry_blocklist_kind_digest"
+    t.index ["source_user_id"], name: "index_coconique_reentry_blocklist_entries_on_source_user_id"
+  end
+
+  create_table "coconique_reentry_signals", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.datetime "detected_at", null: false
+    t.datetime "matched_blocklist_at"
+    t.jsonb "metadata", default: {}, null: false
+    t.string "provider"
+    t.string "signal_digest", null: false
+    t.string "signal_kind", null: false
+    t.bigint "source_id"
+    t.string "source_type"
+    t.integer "status", default: 0, null: false
+    t.datetime "updated_at", null: false
+    t.bigint "user_id", null: false
+    t.index ["signal_kind", "signal_digest"], name: "idx_coconique_reentry_signals_kind_digest"
+    t.index ["status"], name: "index_coconique_reentry_signals_on_status"
+    t.index ["user_id", "signal_kind", "signal_digest"], name: "idx_coconique_reentry_signals_user_kind_digest", unique: true
+    t.index ["user_id"], name: "index_coconique_reentry_signals_on_user_id"
   end
 
   create_table "coconique_report_actions", force: :cascade do |t|
@@ -648,11 +696,15 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_11_093000) do
   create_table "email_verifications", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.datetime "expires_at", null: false
+    t.string "pending_email"
+    t.string "purpose", default: "email_verification", null: false
     t.string "token_digest", null: false
     t.datetime "updated_at", null: false
     t.datetime "used_at"
     t.bigint "user_id", null: false
     t.index ["expires_at"], name: "index_email_verifications_on_expires_at"
+    t.index ["pending_email"], name: "index_email_verifications_on_pending_email"
+    t.index ["purpose"], name: "index_email_verifications_on_purpose"
     t.index ["token_digest"], name: "index_email_verifications_on_token_digest", unique: true
     t.index ["user_id", "used_at"], name: "index_email_verifications_on_user_id_and_used_at"
     t.index ["user_id"], name: "index_email_verifications_on_user_id"
@@ -695,6 +747,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_11_093000) do
   create_table "payment_checkout_sessions", force: :cascade do |t|
     t.integer "amount_total", null: false
     t.text "cancel_url", null: false
+    t.string "checkout_mode", default: "payment", null: false
     t.datetime "completed_at"
     t.datetime "created_at", null: false
     t.bigint "credit_product_id", null: false
@@ -705,12 +758,19 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_11_093000) do
     t.string "status", default: "created", null: false
     t.string "stripe_checkout_session_id"
     t.bigint "stripe_customer_id", null: false
+    t.string "stripe_invoice_id"
+    t.string "stripe_payment_intent_id"
+    t.string "stripe_payment_status"
+    t.string "stripe_subscription_id"
     t.text "success_url", null: false
     t.datetime "updated_at", null: false
     t.bigint "user_id", null: false
+    t.index ["checkout_mode"], name: "index_payment_checkout_sessions_on_checkout_mode"
     t.index ["credit_product_id"], name: "index_payment_checkout_sessions_on_credit_product_id"
     t.index ["stripe_checkout_session_id"], name: "index_payment_checkout_sessions_on_stripe_checkout_session_id", unique: true
     t.index ["stripe_customer_id"], name: "index_payment_checkout_sessions_on_stripe_customer_id"
+    t.index ["stripe_invoice_id"], name: "index_payment_checkout_sessions_on_stripe_invoice_id"
+    t.index ["stripe_subscription_id"], name: "index_payment_checkout_sessions_on_stripe_subscription_id"
     t.index ["user_id", "created_at"], name: "index_payment_checkout_sessions_on_user_id_and_created_at"
     t.index ["user_id", "status"], name: "index_payment_checkout_sessions_on_user_id_and_status"
     t.index ["user_id"], name: "index_payment_checkout_sessions_on_user_id"
@@ -808,9 +868,16 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_11_093000) do
     t.datetime "card_registered_at"
     t.datetime "coconique_founder_beta_joined_at"
     t.date "coconique_last_host_ticket_granted_on"
+    t.string "coconique_stripe_price_id"
+    t.string "coconique_stripe_subscription_id"
+    t.datetime "coconique_subscription_cancel_at"
+    t.boolean "coconique_subscription_cancel_at_period_end", default: false, null: false
     t.datetime "coconique_subscription_canceled_at"
     t.datetime "coconique_subscription_current_period_ends_at"
     t.datetime "coconique_subscription_current_period_started_at"
+    t.datetime "coconique_subscription_last_payment_at"
+    t.string "coconique_subscription_latest_invoice_id"
+    t.datetime "coconique_subscription_past_due_at"
     t.string "coconique_subscription_plan"
     t.datetime "coconique_subscription_started_at"
     t.integer "coconique_subscription_status", default: 0, null: false
@@ -842,7 +909,9 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_11_093000) do
     t.datetime "withdrawn_at"
     t.index ["beta_member_type"], name: "index_users_on_beta_member_type"
     t.index ["coconique_last_host_ticket_granted_on"], name: "index_users_on_coconique_last_host_ticket_granted_on"
+    t.index ["coconique_stripe_subscription_id"], name: "index_users_on_coconique_stripe_subscription_id", unique: true, where: "(coconique_stripe_subscription_id IS NOT NULL)"
     t.index ["coconique_subscription_canceled_at"], name: "index_users_on_coconique_subscription_canceled_at"
+    t.index ["coconique_subscription_latest_invoice_id"], name: "index_users_on_coconique_subscription_latest_invoice_id"
     t.index ["coconique_subscription_plan"], name: "index_users_on_coconique_subscription_plan"
     t.index ["coconique_subscription_status"], name: "index_users_on_coconique_subscription_status"
     t.index ["email"], name: "index_users_on_email", unique: true
@@ -887,9 +956,12 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_11_093000) do
   add_foreign_key "coconique_participation_requests", "coconique_events"
   add_foreign_key "coconique_participation_requests", "users"
   add_foreign_key "coconique_participation_requests", "users", column: "attendance_recorded_by_id"
+  add_foreign_key "coconique_participation_requests", "users", column: "canceled_by_id"
   add_foreign_key "coconique_participation_requests", "users", column: "reviewed_by_id"
   add_foreign_key "coconique_phone_verification_attempts", "users"
   add_foreign_key "coconique_promo_code_redemptions", "users"
+  add_foreign_key "coconique_reentry_blocklist_entries", "users", column: "source_user_id"
+  add_foreign_key "coconique_reentry_signals", "users"
   add_foreign_key "coconique_report_actions", "coconique_reports"
   add_foreign_key "coconique_report_actions", "users", column: "admin_user_id"
   add_foreign_key "coconique_report_evidences", "coconique_reports"

@@ -20,7 +20,7 @@ module Webhooks
 
       webhook_event.save!
 
-      process_event!(event)
+      process_event!(event, webhook_event: webhook_event)
 
       webhook_event.update!(
         processed_at: Time.current,
@@ -59,12 +59,20 @@ module Webhooks
       )
     end
 
-    def process_event!(event)
+    def process_event!(event, webhook_event:)
       case event.type
       when "checkout.session.completed"
         handle_checkout_session_completed!(event.data.object)
       when "checkout.session.expired"
         handle_checkout_session_expired!(event.data.object)
+      when "invoice.paid"
+        CoconiqueBilling.apply_stripe_invoice_paid!(stripe_invoice: event.data.object, source: webhook_event)
+      when "invoice.payment_failed", "invoice.payment_action_required"
+        CoconiqueBilling.mark_stripe_invoice_payment_failed!(stripe_invoice: event.data.object, source: webhook_event)
+      when "customer.subscription.updated"
+        CoconiqueBilling.sync_stripe_subscription_status!(stripe_subscription: event.data.object, source: webhook_event)
+      when "customer.subscription.deleted"
+        CoconiqueBilling.handle_stripe_subscription_deleted!(stripe_subscription: event.data.object, source: webhook_event)
       when "identity.verification_session.verified"
         handle_identity_verification_session_verified!(event.data.object)
       when "identity.verification_session.requires_input"
@@ -80,6 +88,16 @@ module Webhooks
       payment = PaymentCheckoutSession.find_by!(
         stripe_checkout_session_id: session.id
       )
+
+      return if payment.completed? && !payment.subscription_checkout?
+
+      if payment.subscription_checkout?
+        CoconiqueBilling.record_stripe_subscription_checkout_completed!(
+          payment: payment,
+          checkout_session: session
+        )
+        return
+      end
 
       return if payment.completed?
 

@@ -44,6 +44,8 @@ class CoconiqueIdentityVerificationSession < ApplicationRecord
       )
       user.refresh_coconique_safety_registered_at!
     end
+
+    Coconique::ReentrySignals.record_identity_signals_for_session!(reload) if defined?(Coconique::ReentrySignals)
   end
 
   def mark_rejected!(reason: nil, provider_status: nil, document_type: nil, metadata: {})

@@ -13,15 +13,20 @@ module Api
 
         def finish_due_coconique_events!
           current_user&.sync_coconique_host_tickets! if current_user&.persisted?
-          CoconiqueEvent.finish_due_events!
+
+          run_coconique_background_sync_once!("finish_due_events") do
+            CoconiqueEvent.finish_due_events!
+          end
         rescue StandardError => e
           Rails.logger.warn("[CoconiqueEvent] finish_due_events failed: #{e.class} #{e.message}")
           nil
         end
 
         def sync_coconique_safety_check_sessions!
-          CoconiqueSafetyCheckSession.create_due_sessions!
-          CoconiqueSafetyCheckSession.process_due_notifications!
+          run_coconique_background_sync_once!("safety_check_sessions") do
+            CoconiqueSafetyCheckSession.create_due_sessions!
+            CoconiqueSafetyCheckSession.process_due_notifications!
+          end
         rescue NameError
           # 安全確認系のmigration前でも既存機能を止めない。
           nil
@@ -31,6 +36,15 @@ module Api
         rescue StandardError => e
           Rails.logger.warn("[CoconiqueSafetyCheckSession] sync failed: #{e.class} #{e.message}")
           nil
+        end
+
+        def run_coconique_background_sync_once!(key)
+          interval = ENV.fetch("COCONIQUE_REQUEST_SYNC_INTERVAL_SECONDS", "60").to_i.clamp(5, 3600)
+          cache_key = "coconique:request_sync:#{key}"
+          return if Rails.cache.exist?(cache_key)
+
+          Rails.cache.write(cache_key, true, expires_in: interval.seconds)
+          yield
         end
 
         def find_event!
@@ -235,7 +249,7 @@ module Api
             ok: false,
             error: {
               code: "COCONIQUE_SAFETY_REGISTRATION_REQUIRED",
-              message: "この機能を利用するには、初回のみ安全登録が必要です。電話番号確認と本人確認を完了してください。"
+              message: "この機能を利用するには、初回のみ安全登録が必要です。月額利用登録と本人確認を完了してください。"
             },
             data: {
               safety_registration: serialize_coconique_safety_registration_status(current_user),
@@ -293,6 +307,9 @@ module Api
         end
 
         def serialize_coconique_safety_registration_status(user)
+          CoconiqueBilling.repair_paid_subscription_state!(user) if user&.persisted?
+          user.reload if user&.persisted?
+
           collaborator = user.coconique_collaborator_beta?
           missing = user.coconique_safety_missing_requirements
 
@@ -320,6 +337,7 @@ module Api
             "additionalHostTicketPurchaseLimitPerPeriod" => CoconiqueBilling::MAX_ADDITIONAL_HOST_TICKET_PURCHASES_PER_PERIOD,
             "additionalHostTicketPurchasesThisPeriod" => user.persisted? ? CoconiqueBilling.additional_host_ticket_purchases_count(user) : 0,
             "promoCodeVerified" => user.promo_code_verified?,
+            "smsRequired" => false,
             "phoneVerified" => user.phone_verified?,
             "phoneVerificationStatus" => user.phone_verification_status,
             "phoneVerifiedAt" => user.phone_verified_at&.iso8601,
@@ -338,6 +356,8 @@ module Api
             "operatorVerificationStatus" => user.operator_verification_status,
             "operatorVerified" => user.beta_operator_verified?,
             "operatorVerifiedAt" => user.operator_verified_at&.iso8601,
+            "reentryIdentityBlocked" => defined?(::Coconique::ReentrySignals) ? ::Coconique::ReentrySignals.blocked_identity_signal?(user) : false,
+            "reentryPaymentReviewRequired" => defined?(::Coconique::ReentrySignals) ? ::Coconique::ReentrySignals.blocked_payment_signal?(user) : false,
             "safetyRegisteredAt" => user.safety_registered_at&.iso8601,
             "missingRequirements" => missing,
             "nextStep" => safety_registration_next_step_for(user, missing),
@@ -350,7 +370,6 @@ module Api
           return "email" if missing.include?("email")
           return "card" if missing.include?("card") || missing.include?("subscription")
           return "promo_code" if missing.include?("promo_code")
-          return "phone" if missing.include?("phone")
           return "identity" if missing.include?("identity") || missing.include?("age_over_18")
           return "account_status" if missing.include?("account_status")
 
@@ -359,7 +378,6 @@ module Api
 
         def safety_registration_badges_for(user)
           badges = []
-          badges << { "key" => "phone_verified", "label" => "電話番号確認済み" } if user.phone_verified?
           badges << { "key" => "identity_verified", "label" => "本人確認済み" } if user.identity_verified?
           badges << { "key" => "beta_collaborator", "label" => "β協力メンバー" } if user.coconique_collaborator_beta?
           badges << { "key" => "operator_verified", "label" => "運営確認済み" } if user.beta_operator_verified?
@@ -378,9 +396,9 @@ module Api
           when :public_card
             payload
           when :public_detail
-            payload.merge(public_event_detail_payload(event, meeting_place_hidden: true))
+            payload.merge(public_event_detail_payload(event, meeting_place_hidden: true, request_for_user: request_for_user))
           else
-            payload.merge(full_event_payload(event, meeting_place_hidden: false))
+            payload.merge(full_event_payload(event, meeting_place_hidden: false, request_for_user: request_for_user))
           end
         end
 
@@ -392,6 +410,23 @@ module Api
           serialize_event(event, include_user_context: true, visibility: :full)
         end
 
+        def event_sensitive_details_unlocked?(event, request_for_user = nil)
+          return true if event.hosted_by?(current_user) || current_user&.admin?
+          return true if request_for_user&.approved?
+
+          current_user&.coconique_can_apply_or_publish?
+        end
+
+        def event_sensitive_detail_gate(event, request_for_user = nil)
+          unlocked = event_sensitive_details_unlocked?(event, request_for_user)
+          {
+            "sensitiveDetailsLocked" => !unlocked,
+            "sensitiveDetailsUnlockRequirement" => unlocked ? nil : "billing_and_identity",
+            "sensitiveDetailsUnlockMessage" => unlocked ? nil : "開催日時・集合場所・参加人数・費用などは、月額利用登録と本人確認の完了後に表示されます。",
+            "sensitiveDetailsMissingRequirements" => unlocked ? [] : Array(current_user&.coconique_safety_missing_requirements)
+          }
+        end
+
         def resolve_event_visibility(event, request_for_user, requested_visibility)
           return requested_visibility unless requested_visibility == :auto
           return :full if event.hosted_by?(current_user) || current_user&.admin?
@@ -401,24 +436,27 @@ module Api
         end
 
         def base_event_payload(event, include_user_context:, request_for_user: nil)
+          sensitive_unlocked = event_sensitive_details_unlocked?(event, request_for_user)
+
           {
             "id" => event.public_id,
             "title" => event.title,
             "categoryKey" => event.category_key,
+            "venueName" => sensitive_unlocked ? event.try(:venue_name) : nil,
             "area" => event.area,
             "areaPrefecture" => event.respond_to?(:area_prefecture) ? event.area_prefecture : nil,
             "areaCity" => event.respond_to?(:area_city) ? event.area_city : nil,
-            "startsAt" => event.starts_at&.iso8601,
-            "endsAt" => event.ends_at&.iso8601,
+            "startsAt" => sensitive_unlocked ? event.starts_at&.iso8601 : nil,
+            "endsAt" => sensitive_unlocked ? event.ends_at&.iso8601 : nil,
             "imageUrl" => event.image_url,
-            "capacity" => event.capacity,
-            "minParticipants" => event.min_participants,
-            "currentParticipants" => event.current_participants,
+            "capacity" => sensitive_unlocked ? event.capacity : nil,
+            "minParticipants" => sensitive_unlocked ? event.min_participants : nil,
+            "currentParticipants" => sensitive_unlocked ? event.current_participants : nil,
             "interestedCount" => event.interested_count,
-            "costLabel" => event.cost_label,
-            "hostDisplayName" => event.host_display_name,
-            "hostAgeGroup" => event.host_age_group,
-            "hostUserId" => event.host_id&.to_s,
+            "costLabel" => sensitive_unlocked ? event.cost_label : nil,
+            "hostDisplayName" => sensitive_unlocked ? event.host_display_name : nil,
+            "hostAgeGroup" => sensitive_unlocked ? event.host_age_group : nil,
+            "hostUserId" => sensitive_unlocked ? event.host_id&.to_s : nil,
             "summary" => event.summary,
             "status" => event.status,
             "isFavorite" => include_user_context ? event.favorited_by?(current_user) : false,
@@ -432,7 +470,7 @@ module Api
             "hostTicketReservedAt" => event.respond_to?(:host_ticket_reserved_at) ? event.host_ticket_reserved_at&.iso8601 : nil,
             "hostTicketReleasedAt" => event.respond_to?(:host_ticket_released_at) ? event.host_ticket_released_at&.iso8601 : nil,
             "memberConditionMatched" => include_user_context ? event_matches_member_visibility?(event) : true
-          }
+          }.merge(event_sensitive_detail_gate(event, request_for_user))
         end
 
         def blocking_request_status_for(participation_request)
@@ -442,13 +480,15 @@ module Api
           nil
         end
 
-        def public_event_detail_payload(event, meeting_place_hidden: true)
+        def public_event_detail_payload(event, meeting_place_hidden: true, request_for_user: nil)
+          sensitive_unlocked = event_sensitive_details_unlocked?(event, request_for_user)
+
           {
-            "meetingPlaceIsHidden" => meeting_place_hidden,
+            "meetingPlaceIsHidden" => meeting_place_hidden || !sensitive_unlocked,
             "imageUrls" => event.image_urls.presence || Array(event.image_url).compact,
-            "dressCode" => event.dress_code,
+            "dressCode" => sensitive_unlocked ? event.dress_code : nil,
             "hostMessage" => event.host_message,
-            "recruitmentEndsAt" => event.recruitment_ends_at&.iso8601,
+            "recruitmentEndsAt" => sensitive_unlocked ? event.recruitment_ends_at&.iso8601 : nil,
             "targetMembers" => event.target_members || [],
             "isPublicGamblingWatching" => event.is_public_gambling_watching,
             "requiresAge20Verified" => event.requires_age20_verified,
@@ -457,9 +497,9 @@ module Api
           }
         end
 
-        def full_event_payload(event, meeting_place_hidden:)
-          public_event_detail_payload(event, meeting_place_hidden: meeting_place_hidden).merge(
-            "meetingPlace" => meeting_place_hidden ? nil : event.meeting_place,
+        def full_event_payload(event, meeting_place_hidden:, request_for_user: nil)
+          public_event_detail_payload(event, meeting_place_hidden: meeting_place_hidden, request_for_user: request_for_user).merge(
+            "meetingPlace" => (meeting_place_hidden || !event_sensitive_details_unlocked?(event, request_for_user)) ? nil : event.meeting_place,
             "referenceUrl" => event.reference_url,
             "publishedAt" => event.published_at&.iso8601,
             "closedAt" => event.closed_at&.iso8601,
@@ -571,6 +611,13 @@ module Api
             "status" => participation_request.status,
             "reviewedAt" => participation_request.reviewed_at&.iso8601,
             "withdrawnAt" => participation_request.withdrawn_at&.iso8601,
+            "canceledAt" => participation_request.try(:canceled_at)&.iso8601,
+            "cancellationReasonCategory" => participation_request.try(:cancellation_reason_category),
+            "cancellationTiming" => participation_request.try(:cancellation_timing),
+            "lateCancelPoints" => participation_request.try(:late_cancel_points).to_i,
+            "cancelDeadline" => participation_request.respond_to?(:cancel_deadline) ? participation_request.cancel_deadline&.iso8601 : nil,
+            "canCancel" => viewer_role == "participant" && participation_request.respond_to?(:cancellable_by_participant?) && participation_request.cancellable_by_participant?,
+            "canHostCancel" => ["host", "admin"].include?(viewer_role) && participation_request.approved?,
             "attendanceStatus" => participation_request.attendance_status,
             "attendanceRecordedAt" => participation_request.attendance_recorded_at&.iso8601,
             "createdAt" => participation_request.created_at&.iso8601,
@@ -591,6 +638,7 @@ module Api
           serialize_participation_request_summary(participation_request).merge(
             "event" => serialize_event(event),
             "message" => participation_request.message,
+            "cancellationMessage" => participation_request.try(:cancellation_message),
             "attendanceNote" => participation_request.attendance_note,
             "attendanceRecordedByDisplayName" => attendance_recorded_by_display_name(participation_request),
             "reviewedByDisplayName" => reviewer_display_name(participation_request),
@@ -826,6 +874,8 @@ module Api
             :area_prefecture,
             :areaCity,
             :area_city,
+            :venueName,
+            :venue_name,
             :startsAt,
             :starts_at,
             :endsAt,
@@ -866,6 +916,7 @@ module Api
             category_key: first_present(permitted[:categoryKey], permitted[:category_key]),
             area_prefecture: first_present(permitted[:areaPrefecture], permitted[:area_prefecture]),
             area_city: first_present(permitted[:areaCity], permitted[:area_city]),
+            venue_name: first_present(permitted[:venueName], permitted[:venue_name]),
             area: event_area_from_params(permitted),
             starts_at: parse_event_time_param(first_present(permitted[:startsAt], permitted[:starts_at])),
             ends_at: parse_event_time_param(first_present(permitted[:endsAt], permitted[:ends_at])),

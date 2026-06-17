@@ -1,7 +1,7 @@
 require "cgi"
 
 class AuthMailer < ApplicationMailer
-  def email_verification(user, token)
+  def email_verification(user, token, to_email: nil, subject: "メールアドレス確認のお願い")
     @user = user
     @token = token
     @url = build_url(
@@ -13,8 +13,8 @@ class AuthMailer < ApplicationMailer
     )
 
     mail(
-      to: @user.email,
-      subject: "メールアドレス確認のお願い"
+      to: to_email.presence || @user.email,
+      subject: subject
     )
   end
 

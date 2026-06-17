@@ -1,5 +1,5 @@
 class CreditTransaction < ApplicationRecord
-  ZERO_AMOUNT_TRANSACTION_TYPES = %w[consume_reserved forfeit_reserved subscription_canceled admin_note].freeze
+  ZERO_AMOUNT_TRANSACTION_TYPES = %w[consume_reserved forfeit_reserved subscription_canceled subscription_past_due admin_note].freeze
 
   belongs_to :user
   belongs_to :credit_balance

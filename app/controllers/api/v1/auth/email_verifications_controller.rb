@@ -71,18 +71,19 @@ module Api
             )
           end
 
+          purpose = verification.purpose
           verification.confirm!
 
           AuditLog.record!(
             user: verification.user,
-            action: "email_verification.confirmed",
+            action: purpose == EmailVerification::PURPOSE_EMAIL_CHANGE ? "email_change.confirmed" : "email_verification.confirmed",
             request: request,
             target: verification
           )
 
           render_success(
             {
-              message: "メールアドレスを認証しました。"
+              message: purpose == EmailVerification::PURPOSE_EMAIL_CHANGE ? "メールアドレスを変更しました。" : "メールアドレスを認証しました。"
             }
           )
         end

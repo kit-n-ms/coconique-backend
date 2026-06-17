@@ -46,6 +46,7 @@ class CoconiqueEvent < ApplicationRecord
   validates :title, presence: true, length: { maximum: 120 }
   validates :category_key, presence: true, inclusion: { in: CATEGORY_KEYS }
   validates :area, presence: true, length: { maximum: 120 }
+  validates :venue_name, length: { maximum: 120 }, allow_blank: true
   validates :area_prefecture, length: { maximum: 20 }, allow_blank: true
   validates :area_city, length: { maximum: 40 }, allow_blank: true
   validates :starts_at, :ends_at, presence: true

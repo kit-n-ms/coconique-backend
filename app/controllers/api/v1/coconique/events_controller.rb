@@ -244,6 +244,7 @@ module Api
             title: attrs[:title].presence || "無題の予定",
             category_key: attrs[:category_key].presence || "walk",
             area: attrs[:area].presence || "未設定",
+            venue_name: attrs[:venue_name].presence || nil,
             starts_at: start_time,
             ends_at: end_time,
             recruitment_ends_at: recruitment_ends_at,
@@ -304,6 +305,7 @@ module Api
           errors << "タイトルを入力してください" if event.title.blank? || event.title == "無題の予定"
           errors << "カテゴリを選択してください" if event.category_key.blank?
           errors << "予定説明を入力してください" if event.summary.blank?
+          errors << "予定地を入力してください" if event.respond_to?(:venue_name) && event.venue_name.blank?
           errors << "集合場所を入力してください" if event.meeting_place.blank? || event.meeting_place == "未設定"
           errors << "開始日時を未来にしてください" if event.starts_at.blank? || event.starts_at <= Time.current
           errors << "終了日時は開始日時より後にしてください" if event.starts_at.present? && event.ends_at.present? && event.ends_at <= event.starts_at

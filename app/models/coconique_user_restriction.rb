@@ -13,6 +13,7 @@ class CoconiqueUserRestriction < ApplicationRecord
   before_validation :ensure_public_id, on: :create
   before_validation :ensure_defaults
   after_commit :apply_user_account_status!, on: [:create, :update]
+  after_commit :capture_reentry_blocklist_entries_for_ban!, on: [:create, :update]
 
   validates :public_id, presence: true, uniqueness: true
   validates :reason, presence: true, length: { maximum: 500 }
@@ -34,6 +35,20 @@ class CoconiqueUserRestriction < ApplicationRecord
     sync_user_status_after_lift!
   end
 
+  def capture_reentry_blocklist_entries_for_ban!
+    return unless banned? && active_now?
+    return unless defined?(Coconique::ReentrySignals)
+
+    Coconique::ReentrySignals.block_user_signals!(
+      user: user,
+      reason: reason,
+      source: self,
+      admin: created_by_admin
+    )
+  rescue NameError, ActiveRecord::StatementInvalid => e
+    Rails.logger.warn("[CoconiqueUserRestriction] reentry blocklist capture skipped: #{e.class} #{e.message}")
+  end
+
   private
 
   def ensure_public_id
@@ -49,6 +64,7 @@ class CoconiqueUserRestriction < ApplicationRecord
     return unless active_now?
 
     cancel_open_events_for_restricted_user!
+    cancel_participation_requests_for_restricted_user!
 
     if suspended?
       # BANから一時凍結へ変更した場合も、アカウント状態を現在の最新制限に合わせる。
@@ -74,6 +90,26 @@ class CoconiqueUserRestriction < ApplicationRecord
     return unless canceled_count.positive? && persisted?
 
     update_column(:metadata, (metadata || {}).merge("canceled_open_events_count" => canceled_count, "canceled_open_events_at" => Time.current.iso8601))
+  end
+
+  def cancel_participation_requests_for_restricted_user!
+    message = "安全管理上の理由により、このユーザーの参加はキャンセルとなりました。ご迷惑をおかけし申し訳ありません。"
+
+    user.coconique_participation_requests
+      .joins(:coconique_event)
+      .where(status: [:pending, :approved])
+      .where(coconique_events: { status: CoconiqueEvent.statuses.values_at("recruiting", "closed", "confirmed") })
+      .find_each do |participation|
+        participation.auto_withdraw_by_system!(
+          reason: "account_#{status}",
+          actor: created_by_admin,
+          notify_host: participation.approved?,
+          user_message: message,
+          category: "safety"
+        )
+      end
+  rescue StandardError => e
+    Rails.logger.warn("[CoconiqueUserRestriction] participation cancel skipped: #{e.class} #{e.message}")
   end
 
   def apply_account_billing_policy!(for_ban:)

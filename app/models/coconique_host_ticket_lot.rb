@@ -29,6 +29,12 @@ class CoconiqueHostTicketLot < ApplicationRecord
       .where.not(expires_at: nil)
       .where("expires_at <= ?", now)
   }
+  scope :monthly_grants_for_current_period, ->(now = Time.current) {
+    where(grant_type: grant_types[:monthly_grant])
+      .where("total_count > 0")
+      .where("granted_at <= ?", now)
+      .where("expires_at IS NULL OR expires_at > ?", now)
+  }
 
   def available?
     available_count.positive? && (expires_at.blank? || expires_at > Time.current)

@@ -29,20 +29,34 @@ class CoconiquePhoneVerificationAttempt < ApplicationRecord
 
   def self.build_for!(user:, phone_number:, provider: nil, code: nil)
     normalized_phone = normalize_phone_number(phone_number)
-    verification_code = code.presence || generated_code_for_environment
+    selected_provider = provider.presence || default_provider
+    verification_code = code.presence || generated_code_for_environment(provider: selected_provider)
+    provider_metadata = {
+      "environment" => Rails.env,
+      "fake_code_used" => fake_provider?(selected_provider)
+    }
+
+    if selected_provider == "twilio_verify"
+      twilio_response = Coconique::SmsVerifications::TwilioVerifyProvider.new.start_verification(phone_number: normalized_phone)
+      provider_metadata.merge!(
+        "twilio_verification_sid" => twilio_response["sid"],
+        "twilio_status" => twilio_response["status"],
+        "twilio_channel" => twilio_response["channel"],
+        "twilio_send_code_attempts_count" => Array(twilio_response["send_code_attempts"]).length,
+        "twilio_created_at" => twilio_response["date_created"],
+        "twilio_updated_at" => twilio_response["date_updated"]
+      ).compact!
+    end
 
     create!(
       user: user,
       phone_number_digest: digest_value(normalized_phone),
       code_digest: digest_value(verification_code),
       sent_to_masked: mask_phone_number(normalized_phone),
-      provider: provider.presence || default_provider,
+      provider: selected_provider,
       status: :pending,
       expires_at: CODE_TTL.from_now,
-      metadata: {
-        "environment" => Rails.env,
-        "fake_code_used" => fake_provider?
-      }
+      metadata: provider_metadata
     )
   end
 
@@ -63,17 +77,20 @@ class CoconiquePhoneVerificationAttempt < ApplicationRecord
   end
 
   def self.default_provider
-    ENV.fetch("COCONIQUE_SMS_PROVIDER", Rails.env.production? ? "firebase_phone_auth" : "fake_sms")
+    ENV.fetch("COCONIQUE_SMS_PROVIDER", Rails.env.production? ? "twilio_verify" : "fake_sms")
   end
 
-  def self.fake_provider?
-    default_provider == "fake_sms" || Rails.env.development? || Rails.env.test?
+  def self.fake_provider?(provider = default_provider)
+    provider.to_s == "fake_sms" || Rails.env.test?
   end
 
-  def self.generated_code_for_environment
-    return DEV_TEST_CODE if fake_provider?
+  def self.generated_code_for_environment(provider: default_provider)
+    return DEV_TEST_CODE if fake_provider?(provider)
 
-    SecureRandom.random_number(1_000_000).to_s.rjust(6, "0")
+    # External providers such as Twilio Verify generate and validate the OTP on
+    # the vendor side. Keep a digest placeholder so existing DB constraints stay
+    # intact without storing vendor-generated OTPs locally.
+    "external-#{SecureRandom.hex(16)}"
   end
 
   def self.digest_secret
@@ -95,8 +112,19 @@ class CoconiquePhoneVerificationAttempt < ApplicationRecord
       return false
     end
 
-    return false unless self.class.digest_value(code.to_s.strip) == code_digest
+    verified = if provider == "twilio_verify"
+      verify_with_twilio!(code)
+    else
+      self.class.digest_value(code.to_s.strip) == code_digest
+    end
 
+    return false unless verified
+
+    mark_confirmed!
+    true
+  end
+
+  def mark_confirmed!
     transaction do
       update!(status: :confirmed, confirmed_at: Time.current)
       user.update!(
@@ -105,8 +133,23 @@ class CoconiquePhoneVerificationAttempt < ApplicationRecord
         phone_number_digest: phone_number_digest
       )
     end
+  end
 
-    true
+  def verify_with_twilio!(code)
+    approved, response = Coconique::SmsVerifications::TwilioVerifyProvider.new.check_verification(
+      attempt: self,
+      code: code
+    )
+
+    self.metadata = metadata.merge(
+      "twilio_check_status" => response["status"],
+      "twilio_check_valid" => response["valid"],
+      "twilio_check_sid" => response["sid"],
+      "twilio_checked_at" => Time.current.iso8601
+    ).compact
+    save!
+
+    approved
   end
 
   private

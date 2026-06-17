@@ -2,7 +2,7 @@ module Api
   module V1
     module Coconique
       class ParticipationRequestsController < BaseController
-        before_action :set_participation_request, only: [:show, :update, :approve, :reject, :withdraw, :attendance]
+        before_action :set_participation_request, only: [:show, :update, :approve, :reject, :withdraw, :cancel, :host_cancel, :attendance]
         before_action :set_event_for_collection, only: [:index, :participants]
 
         def index
@@ -238,6 +238,80 @@ module Api
           )
         end
 
+        def cancel
+          unless @participation_request.user_id == current_user.id
+            return render_error(
+              code: "FORBIDDEN",
+              message: "この参加をキャンセルする権限がありません。",
+              status: :forbidden
+            )
+          end
+
+          unless @participation_request.cancellable_by_participant?
+            return render_error(
+              code: "PARTICIPATION_REQUEST_NOT_CANCELABLE",
+              message: "この参加申請は現在キャンセルできません。",
+              status: :unprocessable_entity
+            )
+          end
+
+          if @participation_request.pending?
+            @participation_request.withdraw!
+            action_name = "coconique.participation_request.withdrawn"
+          else
+            @participation_request.cancel_by_participant!(
+              category: normalized_cancel_reason_category,
+              message: normalized_cancel_message,
+              actor: current_user
+            )
+            action_name = "coconique.participation_request.canceled_by_participant"
+          end
+
+          AuditLog.record!(
+            user: current_user,
+            action: action_name,
+            request: request,
+            target: @participation_request,
+            metadata: {
+              event_public_id: @participation_request.coconique_event.public_id,
+              cancellation_reason_category: @participation_request.cancellation_reason_category,
+              cancellation_timing: @participation_request.cancellation_timing,
+              late_cancel_points: @participation_request.late_cancel_points
+            }
+          )
+
+          render_success({ participation_request: serialize_participation_request(@participation_request.reload) })
+        end
+
+        def host_cancel
+          event = @participation_request.coconique_event
+          return unless require_event_host!(event)
+
+          unless @participation_request.approved?
+            return render_error(
+              code: "PARTICIPATION_REQUEST_NOT_APPROVED",
+              message: "参加確定済みのメンバーだけキャンセルできます。",
+              status: :unprocessable_entity
+            )
+          end
+
+          @participation_request.cancel_by_host!(
+            reviewer: current_user,
+            reason: params[:reason],
+            user_message: params[:user_message].presence || params[:userMessage]
+          )
+
+          AuditLog.record!(
+            user: current_user,
+            action: "coconique.participation_request.canceled_by_host",
+            request: request,
+            target: @participation_request,
+            metadata: { event_public_id: event.public_id }
+          )
+
+          render_success({ participation_request: serialize_participation_request(@participation_request.reload) })
+        end
+
         private
 
         def set_participation_request
@@ -316,6 +390,15 @@ module Api
         def normalized_attendance_note
           note = params[:attendance_note].presence || params[:attendanceNote].presence
           note.to_s.strip.presence
+        end
+
+        def normalized_cancel_reason_category
+          value = params[:reason_category].presence || params[:reasonCategory].presence || params[:category].presence || "other"
+          value.to_s
+        end
+
+        def normalized_cancel_message
+          params[:message].presence || params[:host_message].presence || params[:hostMessage].presence
         end
 
         def create_approval_chat_message!(participation_request)

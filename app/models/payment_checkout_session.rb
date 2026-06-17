@@ -11,4 +11,8 @@ class PaymentCheckoutSession < ApplicationRecord
   def completed?
     status == "completed"
   end
+
+  def subscription_checkout?
+    checkout_mode == "subscription" || metadata["checkout_mode"] == "subscription"
+  end
 end

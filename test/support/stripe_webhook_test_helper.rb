@@ -1,5 +1,34 @@
 module StripeWebhookTestHelper
-  FakeStripeSession = Struct.new(:id, :payment_status, :payment_intent, keyword_init: true)
+  FakeStripeSession = Struct.new(:id, :payment_status, :payment_intent, :subscription, :customer, :invoice, keyword_init: true)
+  FakeStripePrice = Struct.new(:id, :recurring, keyword_init: true)
+  FakeStripeLine = Struct.new(:price, :period, keyword_init: true)
+  FakeStripeLines = Struct.new(:data, keyword_init: true)
+  FakeStripeInvoice = Struct.new(
+    :id,
+    :customer,
+    :subscription,
+    :payment_intent,
+    :amount_paid,
+    :currency,
+    :billing_reason,
+    :period_start,
+    :period_end,
+    :lines,
+    :metadata,
+    :subscription_details,
+    keyword_init: true
+  )
+  FakeStripeSubscription = Struct.new(
+    :id,
+    :customer,
+    :status,
+    :current_period_start,
+    :current_period_end,
+    :cancel_at_period_end,
+    :cancel_at,
+    :canceled_at,
+    keyword_init: true
+  )
 
   class FakeStripeEvent
     attr_reader :id, :type, :api_version, :livemode, :data
@@ -19,13 +48,32 @@ module StripeWebhookTestHelper
         api_version: api_version,
         livemode: livemode,
         data: {
-          object: {
-            id: data.object.id,
-            payment_status: data.object.payment_status,
-            payment_intent: data.object.payment_intent
-          }
+          object: object_to_hash(data.object)
         }
       }
+    end
+
+    private
+
+    def object_to_hash(object)
+      if object.respond_to?(:to_h)
+        object.to_h.transform_values { |value| object_to_hash_value(value) }.compact
+      else
+        {}
+      end
+    end
+
+    def object_to_hash_value(value)
+      case value
+      when Array
+        value.map { |item| object_to_hash_value(item) }
+      when Struct
+        object_to_hash(value)
+      when OpenStruct
+        value.to_h.transform_values { |item| object_to_hash_value(item) }
+      else
+        value
+      end
     end
   end
 

@@ -26,6 +26,7 @@ class CoconiqueAccountWithdrawalService
       "accountStatus" => user.status,
       "hostedUpcomingEventsCount" => hosted_upcoming_events.count,
       "approvedUpcomingParticipationsCount" => approved_upcoming_participations.count,
+      "pendingParticipationRequestsCount" => pending_participation_requests.count,
       "pendingSafetyChecksCount" => pending_safety_checks.count,
       "hostTicketBalance" => balance.balance,
       "availableHostTicketsCount" => user.coconique_host_ticket_lots.sum(:available_count).to_i,
@@ -45,6 +46,7 @@ class CoconiqueAccountWithdrawalService
     User.transaction do
       user.lock!
       cancel_hosted_events!
+      withdraw_pending_participation_requests!
       withdraw_approved_participations!
       cancel_pending_safety_checks!
       disable_safety_settings!
@@ -70,6 +72,7 @@ class CoconiqueAccountWithdrawalService
         metadata: {
           hosted_upcoming_events_count: hosted_upcoming_events.count,
           approved_upcoming_participations_count: approved_upcoming_participations.count,
+          pending_participation_requests_count: pending_participation_requests.count,
           pending_safety_checks_count: pending_safety_checks.count,
           reason: user.withdrawal_reason
         }
@@ -110,6 +113,14 @@ class CoconiqueAccountWithdrawalService
       .where("coconique_events.ends_at > ?", now)
   end
 
+  def pending_participation_requests
+    user.coconique_participation_requests
+      .pending
+      .joins(:coconique_event)
+      .where(coconique_events: { status: CoconiqueEvent.statuses.values_at("recruiting", "closed", "confirmed") })
+      .where("coconique_events.ends_at > ?", now)
+  end
+
   def pending_safety_checks
     user.coconique_safety_check_sessions.needs_response
   end
@@ -132,17 +143,24 @@ class CoconiqueAccountWithdrawalService
     end
   end
 
+  def withdraw_pending_participation_requests!
+    pending_participation_requests.find_each do |participation|
+      participation.auto_withdraw_by_system!(
+        reason: WITHDRAWAL_PARTICIPATION_REASON,
+        actor: user,
+        notify_host: false,
+        user_message: "参加申請中のメンバーが退会したため、参加申請は自動で終了しました。",
+        category: "withdrawal"
+      )
+    end
+  end
+
   def withdraw_approved_participations!
     approved_upcoming_participations.find_each do |participation|
-      participation.withdraw!
-      CoconiqueNotification.create_system_notification!(
-        user: participation.coconique_event.host,
-        notification_key: "participant-withdrawn-by-account-withdrawal-#{participation.public_id}",
-        title: "参加メンバーがキャンセルしました",
-        body: "『#{participation.coconique_event.title.to_s.truncate(40)}』の参加メンバーが退会に伴い参加キャンセルとなりました。",
-        link_path: "/app/host/events/#{participation.coconique_event.public_id}",
-        occurred_at: Time.current,
-        metadata: { participation_request_id: participation.public_id, event_public_id: participation.coconique_event.public_id }
+      participation.cancel_by_participant!(
+        category: "withdrawal",
+        message: "ユーザー退会に伴い、参加予定をキャンセルしました。",
+        actor: user
       )
     end
   end
