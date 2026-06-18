@@ -24,7 +24,7 @@ DATABASE_URL=postgres://...
 FRONTEND_ORIGIN=https://coconique-staging.example.com
 CORS_ALLOWED_ORIGINS=https://coconique-staging.example.com
 CHECKOUT_ALLOWED_HOSTS=coconique-staging.example.com
-SESSION_COOKIE_NAME=coconique_session
+AUTH_COOKIE_NAME=coconique_session
 CSRF_COOKIE_NAME=coconique_csrf
 AUTH_COOKIE_SECURE=true
 ```
