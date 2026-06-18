@@ -1,6 +1,6 @@
 # Coconique Step 7-6 ステージング反映・Stripe/Didit実接続テスト手順
 
-更新日: 2026-06-17  
+更新日: 2026-06-18  
 対象: Staging環境 / Stripe Test mode / Didit staging相当Workflow
 
 ---
@@ -24,15 +24,16 @@
 
 ### Web
 
-- ステージングURL例: `https://coconique-staging.example.com`
+- ステージングURL例: `https://app.stg.coconique.jp`
 - API接続先はステージングAPIに向く
 - `VITE_COCONIQUE_PUBLIC_APP_ORIGIN` はステージングWeb URL
 
 ### API
 
-- ステージングURL例: `https://coconique-api-staging.example.com`
-- `RAILS_ENV=production` でもよいが、DB/secret/Stripe/Diditは本番と必ず分離
+- ステージングURL例: `https://api.stg.coconique.jp`
+- `RAILS_ENV=production` + `APP_ENV=staging` で運用する。`config/environments/staging.rb` は現時点では作らない
 - `CURRENT_APP_KEY=coconique`
+- `AUTH_COOKIE_DOMAIN=.stg.coconique.jp` を設定する。フロントが `app.stg`、APIが `api.stg` のため、CSRF cookieをWeb側が読める必要がある
 - StripeはTest mode
 - Diditはステージング用Workflowまたは本番前検証用Workflow
 - マイナンバーカードは初期OFF
@@ -44,7 +45,7 @@
 
 ```bash
 bin/rails db:migrate
-bin/rails km:doctor
+bin/rails coconique:doctor
 bin/rails coconique:staging:doctor
 bin/rails coconique:stripe:doctor
 bin/rails coconique:stripe:verify_remote
@@ -54,6 +55,10 @@ bin/rails coconique:identity:doctor
 期待値:
 
 - `coconique:staging:doctor` がErrors 0
+- `RAILS_ENV=production`
+- `APP_ENV=staging`
+- `AUTH_COOKIE_DOMAIN=.stg.coconique.jp`
+- `CORS_ALLOWED_ORIGINS` に `https://app.stg.coconique.jp` が含まれる
 - Stripe keyが `sk_test_` / `pk_test_`
 - Stripe Price/Couponが同じTest modeアカウントで取得できる
 - `STRIPE_TAX_ENABLED=false`
@@ -66,7 +71,42 @@ bin/rails coconique:identity:doctor
 
 ---
 
-## 3. Stripe Dashboard / Test mode設定
+## 3. Cloudflare Access / Cookie / CORS 確認
+
+`*.stg.coconique.jp` はCloudflare Accessで保護する。ただしWebhookはProvider署名で保護するため、Accessをbypassする。
+
+保護対象:
+
+```txt
+app.stg.coconique.jp
+api.stg.coconique.jp
+admin.stg.coconique.jp
+```
+
+Bypass対象:
+
+```txt
+api.stg.coconique.jp/webhooks/stripe
+api.stg.coconique.jp/webhooks/didit
+api.stg.coconique.jp/webhooks/resend
+api.stg.coconique.jp/webhooks/quick_trust
+```
+
+最初に確認すること:
+
+- `app.stg.coconique.jp` がAccess認証後に開く
+- `/api/v1/auth/csrf` が200で返る
+- ブラウザのCookieに `coconique_csrf` が入り、domainが `.stg.coconique.jp` になっている
+- ログイン後に `coconique_session` が入り、domainが `.stg.coconique.jp` になっている
+- `/api/v1/auth/me` が200で返る
+- POST/PATCH/DELETEでCORSやpreflightエラーが出ない
+- Stripe/Didit webhookはAccess認証なしでProviderから到達できる
+
+注意: Rails側にBasic Auth等の保険を入れる場合、`OPTIONS` preflight と `/webhooks/*` を落とさないこと。
+
+---
+
+## 4. Stripe Dashboard / Test mode設定
 
 ### Product / Price
 
@@ -79,7 +119,7 @@ bin/rails coconique:identity:doctor
 ### Webhook endpoint
 
 ```text
-https://coconique-api-staging.example.com/webhooks/stripe
+https://api.stg.coconique.jp/webhooks/stripe
 ```
 
 購読イベント:
@@ -100,7 +140,7 @@ Stripe公式docsでは、サブスクリプションはwebhookで支払い失敗
 
 ---
 
-## 4. Stripe stagingテスト
+## 5. Stripe stagingテスト
 
 ### STG-STRIPE-01 新規ユーザー初回100円Checkout
 
@@ -154,7 +194,7 @@ APIログで `/webhooks/stripe` が記録されること。
 
 ---
 
-## 5. Didit staging設定
+## 6. Didit staging設定
 
 ### Workflow
 
@@ -176,20 +216,20 @@ APIログで `/webhooks/stripe` が記録されること。
 ### Return URL
 
 ```text
-https://coconique-staging.example.com/identity/return
+https://app.stg.coconique.jp/identity/return
 ```
 
 ### Webhook endpoint
 
 ```text
-https://coconique-api-staging.example.com/webhooks/didit
+https://api.stg.coconique.jp/webhooks/didit
 ```
 
 Didit docsではHosted Sessionがユーザー向けフローに推奨され、Session作成で生成されたURLをユーザーに提示し、結果はwebhookまたはAPIで受け取る形が説明されている。
 
 ---
 
-## 6. Didit stagingテスト
+## 7. Didit stagingテスト
 
 ### STG-DIDIT-01 本人確認Session作成
 
@@ -233,7 +273,7 @@ bin/rails runner 'u=User.find_by(email: "stg-user@example.com"); pp u.coconique_
 
 ---
 
-## 7. 開催詳細保護テスト
+## 8. 開催詳細保護テスト
 
 ### STG-PRIVACY-01 未課金ユーザー
 
@@ -257,7 +297,7 @@ bin/rails runner 'u=User.find_by(email: "stg-user@example.com"); pp u.coconique_
 
 ---
 
-## 8. 募集作成/参加/通報の最小スモーク
+## 9. 募集作成/参加/通報の最小スモーク
 
 | ID | 手順 | 期待結果 |
 |---|---|---|
@@ -271,9 +311,12 @@ bin/rails runner 'u=User.find_by(email: "stg-user@example.com"); pp u.coconique_
 
 ---
 
-## 9. Staging OK条件
+## 10. Staging OK条件
 
 - [ ] API/Web stagingがHTTPSで動く
+- [ ] Cloudflare Accessで `*.stg.coconique.jp` が保護されている
+- [ ] Stripe/Didit webhook pathはAccess bypass + Provider署名検証になっている
+- [ ] CSRF/session cookie domainが `.stg.coconique.jp` になっている
 - [ ] `bin/rails coconique:staging:doctor` Errors 0
 - [ ] Stripe Test Checkout成功
 - [ ] `invoice.paid` webhookでチケット5枚付与

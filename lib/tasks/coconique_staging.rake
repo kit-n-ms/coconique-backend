@@ -30,20 +30,43 @@ namespace :coconique do
       nil
     end
 
+    def expected_cookie_domain_from_host(host)
+      host = host.to_s.strip
+      return nil if host.blank?
+
+      parts = host.split(".")
+
+      if parts.length >= 4 && parts[1] == "stg"
+        return ".#{parts[1..].join(".")}"
+      end
+
+      return ".#{parts[-2..].join(".")}" if parts.length >= 3
+
+      nil
+    end
+
     desc "Check Coconique staging environment before Stripe/Didit real integration tests"
     task doctor: :environment do
+      app_env = staging_env("APP_ENV")
       frontend_origin = staging_env("FRONTEND_ORIGIN")
+      cors_allowed_origins = staging_env("CORS_ALLOWED_ORIGINS")
       vite_public_origin = staging_env("VITE_COCONIQUE_PUBLIC_APP_ORIGIN")
       identity_return_url = staging_env("COCONIQUE_IDENTITY_PUBLIC_RETURN_URL")
       portal_return_url = staging_env("STRIPE_BILLING_PORTAL_RETURN_URL")
       checkout_allowed_hosts = staging_env("CHECKOUT_ALLOWED_HOSTS")
       frontend_host = staging_host_from_url(frontend_origin)
+      expected_cookie_domain = staging_env("EXPECTED_COOKIE_DOMAIN").presence || expected_cookie_domain_from_host(frontend_host)
 
       checks = []
       checks << staging_check("CURRENT_APP_KEY", staging_env("CURRENT_APP_KEY") == "coconique", "CURRENT_APP_KEY=#{staging_env("CURRENT_APP_KEY").presence || "(blank)"} / expected coconique")
-      checks << staging_check("Rails env", Rails.env.production?, "Rails.env=#{Rails.env}. Render staging may intentionally run RAILS_ENV=production.", severity: :warn)
+      checks << staging_check("Rails env", Rails.env.production?, "Rails.env=#{Rails.env}. Render staging should use RAILS_ENV=production because config/environments/staging.rb is not provided.")
+      checks << staging_check("APP_ENV", app_env == "staging", "APP_ENV=#{app_env.presence || "(blank)"} / expected staging")
       checks << staging_check("FRONTEND_ORIGIN", frontend_origin.start_with?("https://"), "FRONTEND_ORIGIN=#{frontend_origin.presence || "(blank)"} / expected https staging web origin")
+      checks << staging_check("CORS_ALLOWED_ORIGINS", frontend_origin.present? && cors_allowed_origins.split(",").map(&:strip).include?(frontend_origin), "CORS_ALLOWED_ORIGINS should include #{frontend_origin.presence || "the staging web origin"}")
       checks << staging_check("cookie names", staging_env("AUTH_COOKIE_NAME") == "coconique_session" && staging_env("CSRF_COOKIE_NAME") == "coconique_csrf", "AUTH_COOKIE_NAME=#{staging_env("AUTH_COOKIE_NAME").presence || "(blank)"}, CSRF_COOKIE_NAME=#{staging_env("CSRF_COOKIE_NAME").presence || "(blank)"}")
+      checks << staging_check("cookie domain", expected_cookie_domain.present? && staging_env("AUTH_COOKIE_DOMAIN") == expected_cookie_domain, "AUTH_COOKIE_DOMAIN=#{staging_env("AUTH_COOKIE_DOMAIN").presence || "(blank)"} / expected #{expected_cookie_domain || "shared parent domain"}. Required because app and api are separate subdomains and the Web reads the CSRF cookie.")
+      checks << staging_check("secure cookies", staging_env("AUTH_COOKIE_SECURE") == "true", "AUTH_COOKIE_SECURE=#{staging_env("AUTH_COOKIE_SECURE").presence || "(blank)"} / expected true")
+      checks << staging_check("unsafe origin guard", staging_env("REQUIRE_ORIGIN_FOR_UNSAFE_REQUESTS") == "true", "REQUIRE_ORIGIN_FOR_UNSAFE_REQUESTS=#{staging_env("REQUIRE_ORIGIN_FOR_UNSAFE_REQUESTS").presence || "(blank)"} / expected true")
       checks << staging_check("fake Stripe disabled", !staging_bool("COCONIQUE_USE_FAKE_STRIPE_CHECKOUT", "true"), "COCONIQUE_USE_FAKE_STRIPE_CHECKOUT=#{staging_env("COCONIQUE_USE_FAKE_STRIPE_CHECKOUT").presence || "(blank)"} / expected false")
       checks << staging_check("fake identity disabled", !staging_bool("COCONIQUE_USE_FAKE_IDENTITY", "false") && !staging_bool("COCONIQUE_ALLOW_FAKE_IDENTITY", "false"), "COCONIQUE_USE_FAKE_IDENTITY=#{staging_env("COCONIQUE_USE_FAKE_IDENTITY").presence || "(blank)"}, COCONIQUE_ALLOW_FAKE_IDENTITY=#{staging_env("COCONIQUE_ALLOW_FAKE_IDENTITY").presence || "(blank)"} / expected false,false")
       checks << staging_check("SMS not required", staging_env("COCONIQUE_SMS_PROVIDER").blank? || staging_env("COCONIQUE_SMS_PROVIDER") == "fake", "COCONIQUE_SMS_PROVIDER=#{staging_env("COCONIQUE_SMS_PROVIDER").presence || "(blank)"}. SMS is dormant for initial release.", severity: :warn)
@@ -102,24 +125,29 @@ namespace :coconique do
         1. Deploy API and Web with staging env vars.
         2. Run:
            bin/rails db:migrate
-           bin/rails km:doctor
+           bin/rails coconique:doctor
            bin/rails coconique:staging:doctor
            bin/rails coconique:stripe:doctor
            bin/rails coconique:stripe:verify_remote
            bin/rails coconique:identity:doctor
-        3. Open staging Web in a private browser window.
-        4. Create a new general user.
-        5. Complete Stripe Checkout with a Stripe test card.
-        6. Confirm Stripe webhook reaches /webhooks/stripe and host tickets become 5.
-        7. Open Billing Portal from settings and confirm card management page opens.
-        8. Start Didit verification from safety registration.
-        9. Complete Japanese driver license/passport/residence-card + live capture flow.
-        10. Confirm /webhooks/didit receives the event, or sync reflects identityVerified=true.
-        11. Confirm canApplyOrPublish=true.
-        12. Create and publish an event with venueName.
-        13. Confirm unverified/unpaid user receives blurred/protected details and API does not leak restricted fields.
-        14. Submit participation request, approve, check chat and safety check paths.
-        15. Test cancel, report, withdrawal, BAN, and reentry signal blocklist paths.
+        3. Confirm Cloudflare Access behavior:
+           - app.stg.coconique.jp is protected.
+           - api.stg.coconique.jp is protected for browser/API access.
+           - /webhooks/stripe and /webhooks/didit are bypassed and protected by provider signatures.
+           - OPTIONS preflight is not blocked.
+        4. Open staging Web in a private browser window.
+        5. Create a new general user.
+        6. Complete Stripe Checkout with a Stripe test card.
+        7. Confirm Stripe webhook reaches /webhooks/stripe and host tickets become 5.
+        8. Open Billing Portal from settings and confirm card management page opens.
+        9. Start Didit verification from safety registration.
+        10. Complete Japanese driver license/passport/residence-card + live capture flow.
+        11. Confirm /webhooks/didit receives the event, or sync reflects identityVerified=true.
+        12. Confirm canApplyOrPublish=true.
+        13. Create and publish an event with venueName.
+        14. Confirm unverified/unpaid user receives blurred/protected details and API does not leak restricted fields.
+        15. Submit participation request, approve, check chat and safety check paths.
+        16. Test cancel, report, withdrawal, BAN, and reentry signal blocklist paths.
       TEXT
     end
   end
