@@ -328,7 +328,7 @@ GEM
       net-ssh (>= 2.8.0)
       ostruct
     stringio (3.2.0)
-    stripe (19.1.0)
+    stripe (19.2.1)
       bigdecimal
       logger
     svix (1.93.0)
